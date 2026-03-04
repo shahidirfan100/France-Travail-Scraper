@@ -1,0 +1,68 @@
+{
+  "title": "France Travail Scraper",
+  "description": "Scrape job listings from France Travail (francetravail.fr). Provide a start URL or use keyword/location search parameters.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrl": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "Start scraping from a specific France Travail search URL. If provided, keyword and location are ignored.",
+      "editor": "textfield"
+    },
+    "keyword": {
+      "title": "Keyword",
+      "type": "string",
+      "description": "Job search keyword(s), e.g., 'admin', 'développeur', 'comptable'.",
+      "editor": "textfield",
+      "prefill": "admin"
+    },
+    "location": {
+      "title": "Location",
+      "type": "string",
+      "description": "Location filter for job search, e.g., 'Paris', 'Lyon', '75 - Paris'.",
+      "editor": "textfield"
+    },
+    "contractType": {
+      "title": "Contract Type",
+      "type": "string",
+      "description": "Filter by contract type (e.g., CDI, CDD, Intérim). Leave empty for all types.",
+      "editor": "textfield"
+    },
+    "collectDetails": {
+      "title": "Collect job details",
+      "type": "boolean",
+      "description": "If enabled, scraper visits each job detail page for full description, salary, skills, etc.",
+      "editor": "checkbox",
+      "default": true
+    },
+    "results_wanted": {
+      "title": "Maximum number of results",
+      "type": "integer",
+      "description": "The maximum number of job listings to collect.",
+      "minimum": 1,
+      "default": 20,
+      "prefill": 20,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Maximum number of pages",
+      "type": "integer",
+      "description": "A safety cap on the number of listing pages to visit.",
+      "minimum": 1,
+      "editor": "number",
+      "default": 10
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Use Apify Proxy for reliable scraping.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}

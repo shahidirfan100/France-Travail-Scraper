@@ -1,0 +1,15 @@
+{
+  "actorSpecification": 1,
+  "name": "france-travail-scraper",
+  "version": "1.0",
+  "minMemoryMbytes": 512,
+  "maxMemoryMbytes": 1024,
+  "dockerfile": "../Dockerfile",
+  "readme": "../README.md",
+  "input": "./input_schema.json",
+  "output": "./output_schema.json",
+  "nodeJsVersion": "22",
+  "storages": {
+    "dataset": "./dataset_schema.json"
+  }
+}
