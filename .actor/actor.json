@@ -2,6 +2,7 @@
   "actorSpecification": 1,
   "name": "france-travail-scraper",
   "version": "1.0",
+  "buildTag": "latest",
   "minMemoryMbytes": 512,
   "maxMemoryMbytes": 1024,
   "dockerfile": "../Dockerfile",
