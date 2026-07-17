@@ -5,18 +5,49 @@
       "title": "Overview",
       "transformation": {
         "fields": [
+          "offer_id",
           "job_title",
           "company",
+          "employer_name",
           "location",
+          "postal_code",
+          "address_locality",
+          "address_region",
+          "address_country",
           "contract_type",
+          "employment_type",
+          "work_hours",
+          "work_conditions",
+          "travel_required",
           "salary",
+          "salary_currency",
+          "salary_unit",
           "date_posted",
-          "url"
+          "valid_through",
+          "experience",
+          "formation",
+          "skills",
+          "soft_skills",
+          "languages",
+          "qualification",
+          "sector",
+          "contact_email",
+          "contact_phone",
+          "employer_website",
+          "latitude",
+          "longitude",
+          "url",
+          "description_text",
+          "description_html"
         ]
       },
       "display": {
         "component": "table",
         "properties": {
+          "offer_id": {
+            "label": "Offer ID",
+            "format": "text"
+          },
           "job_title": {
             "label": "Job Title",
             "format": "text"
@@ -25,25 +56,129 @@
             "label": "Company",
             "format": "text"
           },
+          "employer_name": {
+            "label": "Employer",
+            "format": "text"
+          },
           "location": {
             "label": "Location",
+            "format": "text"
+          },
+          "postal_code": {
+            "label": "Postal Code",
+            "format": "text"
+          },
+          "address_locality": {
+            "label": "City",
+            "format": "text"
+          },
+          "address_region": {
+            "label": "Region",
+            "format": "text"
+          },
+          "address_country": {
+            "label": "Country",
             "format": "text"
           },
           "contract_type": {
             "label": "Contract",
             "format": "text"
           },
+          "employment_type": {
+            "label": "Employment Type",
+            "format": "text"
+          },
+          "work_hours": {
+            "label": "Work Hours",
+            "format": "text"
+          },
+          "work_conditions": {
+            "label": "Work Conditions",
+            "format": "text"
+          },
+          "travel_required": {
+            "label": "Travel Required",
+            "format": "text"
+          },
           "salary": {
             "label": "Salary",
+            "format": "text"
+          },
+          "salary_currency": {
+            "label": "Salary Currency",
+            "format": "text"
+          },
+          "salary_unit": {
+            "label": "Salary Unit",
             "format": "text"
           },
           "date_posted": {
             "label": "Posted",
             "format": "text"
           },
-          "url": {
-            "label": "URL",
+          "valid_through": {
+            "label": "Valid Through",
+            "format": "text"
+          },
+          "experience": {
+            "label": "Experience",
+            "format": "text"
+          },
+          "formation": {
+            "label": "Education",
+            "format": "text"
+          },
+          "skills": {
+            "label": "Skills",
+            "format": "text"
+          },
+          "soft_skills": {
+            "label": "Soft Skills",
+            "format": "text"
+          },
+          "languages": {
+            "label": "Languages",
+            "format": "text"
+          },
+          "qualification": {
+            "label": "Qualification",
+            "format": "text"
+          },
+          "sector": {
+            "label": "Sector",
+            "format": "text"
+          },
+          "contact_email": {
+            "label": "Contact Email",
+            "format": "text"
+          },
+          "contact_phone": {
+            "label": "Contact Phone",
+            "format": "text"
+          },
+          "employer_website": {
+            "label": "Employer Website",
             "format": "link"
+          },
+          "latitude": {
+            "label": "Latitude",
+            "format": "number"
+          },
+          "longitude": {
+            "label": "Longitude",
+            "format": "number"
+          },
+          "url": {
+            "label": "Job URL",
+            "format": "link"
+          },
+          "description_text": {
+            "label": "Description",
+            "format": "text"
+          },
+          "description_html": {
+            "label": "Description HTML",
+            "format": "text"
           }
         }
       }

@@ -1,33 +1,49 @@
 // France Travail Jobs Scraper - API-first with batched writes and reduced logging
 import { Actor, log } from 'apify';
-import { Dataset } from 'crawlee';
-import { gotScraping } from 'got-scraping';
-import { HeaderGenerator } from 'header-generator';
 import { load as cheerioLoad } from 'cheerio';
+import { Impit } from 'impit';
 
 const BASE_URL = 'https://candidat.francetravail.fr';
 const PAGE_SIZE = 20;
 const SEARCH_RADIUS_KM = 10;
 const DETAIL_CONCURRENCY = 8;
 const PUSH_BATCH_SIZE = 25;
+const REQUEST_TIMEOUT_MS = 30000;
+const REQUEST_RETRIES = 2;
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const OMIT_NULL_VALUES = true;
 const OUTPUT_KEY_ORDER = [
     'offer_id',
     'job_title',
     'company',
     'location',
+    'postal_code',
+    'address_locality',
+    'address_region',
+    'address_country',
     'contract_type',
+    'employment_type',
     'work_hours',
+    'work_conditions',
+    'travel_required',
     'salary',
+    'salary_currency',
+    'salary_unit',
     'date_posted',
+    'valid_through',
     'description_text',
     'description_html',
     'experience',
     'formation',
     'skills',
+    'soft_skills',
     'languages',
     'qualification',
     'sector',
+    'employer_name',
+    'employer_website',
+    'contact_email',
+    'contact_phone',
     'latitude',
     'longitude',
     'url',
@@ -93,6 +109,19 @@ function mergeCookies(existing, incoming) {
     }
 
     return [...map.values()].join('; ');
+}
+
+function extractSetCookies(headers) {
+    const rawCookies = typeof headers.getSetCookie === 'function'
+        ? headers.getSetCookie()
+        : [headers.get('set-cookie')];
+
+    return rawCookies
+        .filter(Boolean)
+        .flatMap((item) => String(item).split(/,(?=[^;,]+=)/))
+        .map((item) => item.split(';')[0].trim())
+        .filter(Boolean)
+        .join('; ');
 }
 
 function sanitizeRecord(record) {
@@ -162,6 +191,19 @@ function findTextBySelectors($, selectors) {
     return undefined;
 }
 
+function getItempropValue($, prop) {
+    const element = $(`[itemprop="${prop}"]`).first();
+    if (!element.length) return undefined;
+
+    return firstNonEmpty(
+        element.attr('content'),
+        element.attr('datetime'),
+        element.attr('href'),
+        element.attr('value'),
+        element.text(),
+    );
+}
+
 function findFollowingContentText($, headingRegex) {
     let match;
 
@@ -207,16 +249,103 @@ function extractArrayBySection($, headingRegex) {
     return [...values];
 }
 
+function extractJsonArrayAt(text, startIndex) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = startIndex; index < text.length; index++) {
+        const char = text[index];
+
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+        } else if (char === '[') {
+            depth++;
+        } else if (char === ']') {
+            depth--;
+            if (depth === 0) return text.slice(startIndex, index + 1);
+        }
+    }
+
+    return '';
+}
+
 function parseTapestryPayload(body) {
     try {
         const parsed = JSON.parse(body);
-        const tapestry = parsed?._tapestry || {};
+        const { _tapestry: tapestry = {} } = parsed ?? {};
         const content = Array.isArray(tapestry.content) ? tapestry.content : [];
         const inits = Array.isArray(tapestry.inits) ? tapestry.inits : [];
         return { content, inits };
     } catch {
         return { content: [], inits: [] };
     }
+}
+
+function getInitialPageListings(body) {
+    const marker = '"rechercheoffres/recherche-offres:initOver"';
+    const markerIndex = body.indexOf(marker);
+    if (markerIndex < 0) return getListingCardsFromHtml(body);
+
+    const startIndex = body.lastIndexOf('[', markerIndex);
+    if (startIndex < 0) return getListingCardsFromHtml(body);
+
+    try {
+        const initOver = JSON.parse(extractJsonArrayAt(body, startIndex));
+        const listings = getInitOverListings([initOver]);
+        return listings.length ? listings : getListingCardsFromHtml(body);
+    } catch {
+        return getListingCardsFromHtml(body);
+    }
+}
+
+function getListingCardsFromHtml(html) {
+    if (!html) return [];
+
+    const $ = cheerioLoad(html);
+    const listings = [];
+
+    $('[data-id-offre]').each((_, element) => {
+        const card = $(element);
+        const offerId = normalizeWhitespace(card.attr('data-id-offre'));
+        if (!offerId) return;
+
+        const href = card.find(`a[href*="${offerId}"], a[href*="/detail/"]`).first().attr('href');
+        const url = href
+            ? new URL(href, BASE_URL).toString()
+            : `${BASE_URL}/offres/recherche/detail/${offerId}`;
+        const location = firstNonEmpty(
+            card.find('[itemprop="address"], .location, .subtext').first().text(),
+            card.text().match(/\b\d{2,3}\s*-\s*[A-ZÀ-Ÿ][A-ZÀ-Ÿ -]+/)?.[0],
+        );
+
+        listings.push({
+            offer_id: offerId,
+            job_title: firstNonEmpty(
+                card.find('[itemprop="title"], h2, h3, .media-heading, .title').first().text(),
+            ),
+            company: firstNonEmpty(
+                card.find('[itemprop="hiringOrganization"], .company, .subtitle').first().text(),
+            ),
+            description_text: firstNonEmpty(card.find('.description, p').first().text()),
+            date_posted: firstNonEmpty(card.find('time, .date').first().text()),
+            location,
+            url,
+        });
+    });
+
+    return listings;
 }
 
 function getInitOverListings(tapestryInits) {
@@ -250,6 +379,12 @@ function getInitOverListings(tapestryInits) {
             };
         })
         .filter(Boolean);
+}
+
+function getTapestryHtmlListings(body) {
+    const { content } = parseTapestryPayload(body);
+    const html = content.map((entry) => String(entry?.[1] || '')).join('');
+    return getListingCardsFromHtml(html);
 }
 
 function getDetailHtmlFromTapestry(body) {
@@ -291,6 +426,7 @@ function extractDetailData(detailHtml, listing) {
     );
 
     const skills = extractArrayBySection($, /(competences|competence)/i);
+    const softSkills = extractArrayBySection($, /savoir[- ]?etre|savoir-être/i);
     const languages = extractArrayBySection($, /langue/i);
 
     const result = {
@@ -308,13 +444,19 @@ function extractDetailData(detailHtml, listing) {
         ),
         location: firstNonEmpty(location, listing.location),
         contract_type: firstNonEmpty(definitions.get('type de contrat'), listing.contract_type),
+        employment_type: firstNonEmpty(getItempropValue($, 'employmentType'), definitions.get('type de contrat')),
         work_hours: firstNonEmpty(definitions.get('duree du travail'), listing.work_hours),
+        work_conditions: firstNonEmpty(definitions.get('conditions de travail')),
+        travel_required: firstNonEmpty(definitions.get('deplacements')),
         salary: firstNonEmpty(definitions.get('salaire')),
+        salary_currency: firstNonEmpty(getItempropValue($, 'currency')),
+        salary_unit: firstNonEmpty(getItempropValue($, 'unitText')),
         date_posted: firstNonEmpty(
             findTextBySelectors($, ['[itemprop="datePosted"]']),
             findFollowingContentText($, /publie|publi[eé]/i),
             listing.date_posted,
         ),
+        valid_through: firstNonEmpty(getItempropValue($, 'validThrough')),
         description_text: descriptionText,
         description_html: firstNonEmpty(descriptionHtml),
         experience: firstNonEmpty(
@@ -328,15 +470,29 @@ function extractDetailData(detailHtml, listing) {
             findFollowingContentText($, /formation|education/i),
         ),
         skills,
+        soft_skills: softSkills,
         languages,
         qualification: firstNonEmpty(
+            normalizeWhitespace($('[itemprop="qualifications"]').first().text()),
             definitions.get('qualification'),
             findFollowingContentText($, /qualification/i),
         ),
         sector: firstNonEmpty(
+            normalizeWhitespace($('[itemprop="industry"]').first().text()),
             definitions.get('secteur d activite'),
             findFollowingContentText($, /secteur d.?activite/i),
         ),
+        postal_code: firstNonEmpty(getItempropValue($, 'postalCode')),
+        address_locality: firstNonEmpty(getItempropValue($, 'addressLocality')),
+        address_region: firstNonEmpty(getItempropValue($, 'addressRegion')),
+        address_country: firstNonEmpty(getItempropValue($, 'addressCountry')),
+        employer_name: firstNonEmpty(getItempropValue($, 'hiringOrganization'), listing.company),
+        employer_website: firstNonEmpty(
+            definitions.get('site internet'),
+            $('a[href^="http"]').filter((_, element) => /site internet/i.test(normalizeWhitespace($(element).text()))).first().attr('href'),
+        ),
+        contact_email: firstNonEmpty(getItempropValue($, 'email')),
+        contact_phone: firstNonEmpty(getItempropValue($, 'telephone')),
         url: listing.url,
     };
 
@@ -346,6 +502,41 @@ function extractDetailData(detailHtml, listing) {
     }
 
     return orderOutputRecord(result);
+}
+
+function createDatasetBatchWriter(dataset, batchSize) {
+    const buffer = [];
+    let total = 0;
+    let chain = Promise.resolve();
+
+    const flush = async () => {
+        if (!buffer.length) return 0;
+
+        const batch = buffer.splice(0, buffer.length);
+        await dataset.pushData(batch);
+        total += batch.length;
+        return batch.length;
+    };
+
+    return {
+        add(item) {
+            if (!item) return chain;
+
+            chain = chain.then(async () => {
+                buffer.push(item);
+                if (buffer.length >= batchSize) await flush();
+            });
+
+            return chain;
+        },
+        async flush() {
+            chain = chain.then(flush);
+            return chain;
+        },
+        get total() {
+            return total;
+        },
+    };
 }
 
 async function mapWithConcurrency(items, concurrency, mapper) {
@@ -367,42 +558,49 @@ async function mapWithConcurrency(items, concurrency, mapper) {
     return results;
 }
 
-async function pushInBatches(items, batchSize) {
+async function pushInBatches(dataset, items, batchSize) {
     if (!items.length) return;
 
     for (let i = 0; i < items.length; i += batchSize) {
         const batch = items.slice(i, i + batchSize);
-        await Dataset.pushData(batch);
+        await dataset.pushData(batch);
     }
 }
 
 async function main() {
-    try {
-        const input = (await Actor.getInput()) || {};
-        const {
-            keyword = '',
-            location = '',
-            contractType = '',
-            results_wanted: resultsWantedRaw = 20,
-            max_pages: maxPagesRaw = 10,
-            collectDetails = true,
-            startUrl,
-            proxyConfiguration,
-        } = input;
+    const input = (await Actor.getInput()) || {};
+    const {
+        keyword = '',
+        location = '',
+        contractType = '',
+        results_wanted: resultsWantedRaw = 20,
+        max_pages: maxPagesRaw = 10,
+        collectDetails = true,
+        startUrl,
+        proxyConfiguration,
+    } = input;
 
-        const resultsWanted = Number.isFinite(+resultsWantedRaw) ? Math.max(1, +resultsWantedRaw) : 20;
-        const maxPages = Number.isFinite(+maxPagesRaw) ? Math.max(1, +maxPagesRaw) : 10;
+    const resultsWanted = Number.isFinite(+resultsWantedRaw) ? Math.max(1, +resultsWantedRaw) : 20;
+    const maxPages = Number.isFinite(+maxPagesRaw) ? Math.max(1, +maxPagesRaw) : 10;
 
-        const proxyConf = proxyConfiguration
-            ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
-            : undefined;
+    const hasCustomProxyUrls = Array.isArray(proxyConfiguration?.proxyUrls) && proxyConfiguration.proxyUrls.length > 0;
+    const shouldCreateProxy = proxyConfiguration && (Actor.isAtHome() || hasCustomProxyUrls);
+    if (proxyConfiguration?.useApifyProxy && !Actor.isAtHome() && !hasCustomProxyUrls) {
+        log.warning('Apify Proxy requested but not available locally. Continuing without proxy.');
+    }
 
-        const headerGenerator = new HeaderGenerator({
-            browsers: [{ name: 'chrome', minVersion: 120, maxVersion: 130 }],
-            devices: ['desktop'],
-            operatingSystems: ['windows'],
-            locales: ['fr-FR', 'fr'],
+    const proxyConf = shouldCreateProxy
+        ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
+        : undefined;
+
+        const proxyUrl = proxyConf ? await proxyConf.newUrl() : undefined;
+        const client = new Impit({
+            browser: 'chrome',
+            ignoreTlsErrors: true,
+            ...(proxyUrl && { proxyUrl }),
         });
+        const dataset = await Actor.openDataset();
+        const batchWriter = createDatasetBatchWriter(dataset, PUSH_BATCH_SIZE);
 
         const buildSearchUrl = () => {
             const url = new URL(`${BASE_URL}/offres/recherche`);
@@ -415,63 +613,65 @@ async function main() {
             return url.toString();
         };
 
-        const getBaseHeaders = (isAjax) => {
-            const headers = headerGenerator.getHeaders({
-                operatingSystems: ['windows'],
-                browsers: ['chrome'],
-                devices: ['desktop'],
-                locales: ['fr-FR'],
-            });
-
-            return {
-                ...headers,
-                accept: isAjax
-                    ? 'application/json, text/javascript, */*; q=0.01'
-                    : 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.5,en;q=0.3',
-                'accept-encoding': 'gzip, deflate, br',
-                'cache-control': 'max-age=0',
-                'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"Windows"',
-                ...(isAjax ? { 'x-requested-with': 'XMLHttpRequest' } : {}),
-            };
-        };
-
-        const request = async (url, { method = 'GET', isAjax = false, cookies = '' } = {}) => {
-            const proxyUrl = proxyConf ? await proxyConf.newUrl() : undefined;
-            const headers = getBaseHeaders(isAjax);
+        const request = async (url, {
+            method = 'GET',
+            isAjax = false,
+            cookies = '',
+            referer = '',
+        } = {}) => {
+            const headers = {};
+            if (isAjax) headers['x-requested-with'] = 'XMLHttpRequest';
             if (cookies) headers.cookie = cookies;
+            if (referer) headers.referer = referer;
 
-            const response = await gotScraping({
-                url,
-                method,
-                headers,
-                proxyUrl,
-                throwHttpErrors: false,
-                responseType: 'text',
-                timeout: { request: 30000 },
-                retry: { limit: 2 },
-            });
+            for (let attempt = 0; attempt <= REQUEST_RETRIES; attempt++) {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-            const rawCookies = response.headers['set-cookie'] || [];
-            const newCookies = (Array.isArray(rawCookies) ? rawCookies : [rawCookies])
-                .filter(Boolean)
-                .map((item) => item.split(';')[0])
-                .join('; ');
+                try {
+                    const response = await client.fetch(url, {
+                        method,
+                        headers,
+                        signal: controller.signal,
+                    });
 
-            return {
-                statusCode: response.statusCode,
-                body: response.body,
-                newCookies,
-            };
+                    const body = await response.text();
+                    const newCookies = extractSetCookies(response.headers);
+
+                    if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < REQUEST_RETRIES) {
+                        const delayMs = (attempt + 1) * 1500;
+                        log.warning(`HTTP ${response.status} received. Retrying in ${delayMs / 1000}s.`);
+                        await new Promise((resolve) => {
+                            setTimeout(resolve, delayMs);
+                        });
+                        continue;
+                    }
+
+                    return {
+                        statusCode: response.status,
+                        body,
+                        newCookies,
+                    };
+                } catch (error) {
+                    if (attempt >= REQUEST_RETRIES) throw error;
+                    const delayMs = (attempt + 1) * 1000;
+                    log.warning(`Request failed: ${error.message}. Retrying in ${delayMs / 1000}s.`);
+                    await new Promise((resolve) => {
+                        setTimeout(resolve, delayMs);
+                    });
+                } finally {
+                    clearTimeout(timeout);
+                }
+            }
+
+            throw new Error('Request failed');
         };
 
         const initialUrl = startUrl || buildSearchUrl();
         const parsedInitialUrl = new URL(initialUrl);
         const queryString = parsedInitialUrl.search.replace(/^\?/, '');
 
-        log.info(`Starting scrape from: ${initialUrl}`);
+        log.info('Starting scrape.');
 
         const initResponse = await request(initialUrl, { method: 'GET', isAjax: false });
         if (initResponse.statusCode !== 200) {
@@ -479,121 +679,141 @@ async function main() {
         }
 
         let cookies = initResponse.newCookies || '';
-        const listings = [];
         const seenIds = new Set();
+        let savedCount = 0;
 
-        for (let page = 0; page < maxPages && listings.length < resultsWanted; page++) {
-            const rangeStart = page * PAGE_SIZE;
-            const rangeEnd = rangeStart + PAGE_SIZE - 1;
-            const pageUrl = `${BASE_URL}/offres/recherche.rechercheoffre:afficherplusderesultats/${rangeStart}-${rangeEnd}/0?${queryString}`;
+        for (let page = 0; page < maxPages && savedCount < resultsWanted; page++) {
+            let pageListings;
 
-            const response = await request(pageUrl, {
-                method: 'POST',
-                isAjax: true,
-                cookies,
-            });
+            if (page === 0) {
+                pageListings = getInitialPageListings(initResponse.body);
+            } else {
+                const rangeStart = page * PAGE_SIZE;
+                const rangeEnd = rangeStart + PAGE_SIZE - 1;
+                const pageUrl = `${BASE_URL}/offres/recherche.rechercheoffre:afficherplusderesultats/${rangeStart}-${rangeEnd}/0?${queryString}`;
 
-            if (response.newCookies) {
-                cookies = mergeCookies(cookies, response.newCookies);
+                const response = await request(pageUrl, {
+                    method: 'POST',
+                    isAjax: true,
+                    cookies,
+                    referer: initialUrl,
+                });
+
+                if (response.newCookies) {
+                    cookies = mergeCookies(cookies, response.newCookies);
+                }
+
+                if (response.statusCode !== 200) {
+                    log.warning(`Listing page ${page + 1} failed with status ${response.statusCode}`);
+                    break;
+                }
+
+                const { inits } = parseTapestryPayload(response.body);
+                pageListings = getInitOverListings(inits);
+                if (!pageListings.length) {
+                    pageListings = getTapestryHtmlListings(response.body);
+                }
             }
-
-            if (response.statusCode !== 200) {
-                log.warning(`Listing page ${page + 1} failed with status ${response.statusCode}`);
-                break;
-            }
-
-            const { inits } = parseTapestryPayload(response.body);
-            const pageListings = getInitOverListings(inits);
 
             if (!pageListings.length) {
                 log.info(`No listings returned at page ${page + 1}, stopping pagination.`);
                 break;
             }
 
+            const pageJobs = [];
             for (const listing of pageListings) {
                 if (seenIds.has(listing.offer_id)) continue;
                 seenIds.add(listing.offer_id);
-                listings.push(listing);
-                if (listings.length >= resultsWanted) break;
+                pageJobs.push(listing);
+                if (savedCount + pageJobs.length >= resultsWanted) break;
             }
 
-            log.info(`Listings page ${page + 1}: +${pageListings.length} fetched, ${listings.length}/${resultsWanted} collected.`);
+            log.info(`Listings page ${page + 1}: +${pageListings.length} fetched, ${savedCount + pageJobs.length}/${resultsWanted} collected.`);
+
+            if (pageJobs.length) {
+                if (!collectDetails) {
+                    const output = pageJobs
+                        .map((item) => {
+                            const ordered = orderOutputRecord(item);
+                            return OMIT_NULL_VALUES ? sanitizeRecord(ordered) : ordered;
+                        })
+                        .filter(Boolean);
+
+                    await pushInBatches(dataset, output, PUSH_BATCH_SIZE);
+                    savedCount += output.length;
+                    log.info(`Saved ${savedCount}/${resultsWanted} listing item(s) without detail expansion.`);
+                } else {
+                    const progressStep = Math.max(10, DETAIL_CONCURRENCY * 2);
+                    let completed = 0;
+
+                    const pageCookies = cookies;
+                    let pageSaved = 0;
+                    await mapWithConcurrency(pageJobs, DETAIL_CONCURRENCY, async (listing) => {
+                        const detailUrl = `${BASE_URL}/offres/recherche.rechercheoffre.voletdetail:chargerdetail?${queryString}&idOffre=${listing.offer_id}&indexFin=0&navigation=`;
+
+                        try {
+                            const detailResponse = await request(detailUrl, {
+                                method: 'POST',
+                                isAjax: true,
+                                cookies: pageCookies,
+                                referer: initialUrl,
+                            });
+
+                            let detailHtml = '';
+
+                            if (detailResponse.statusCode === 200) {
+                                detailHtml = getDetailHtmlFromTapestry(detailResponse.body);
+                            }
+
+                            if (!detailHtml || detailHtml.length < 120) {
+                                const fallback = await request(listing.url, {
+                                    method: 'GET',
+                                    isAjax: false,
+                                    cookies: pageCookies,
+                                });
+                                if (fallback.statusCode === 200) detailHtml = fallback.body;
+                            }
+
+                            const extracted = extractDetailData(detailHtml, listing);
+                            const item = OMIT_NULL_VALUES ? sanitizeRecord(extracted) : extracted;
+                            await batchWriter.add(item);
+                            if (item) pageSaved++;
+                            return item;
+                        } catch (error) {
+                            log.warning(`Detail fetch failed for ${listing.offer_id}: ${error.message}`);
+                            const orderedFallback = orderOutputRecord(listing);
+                            const item = OMIT_NULL_VALUES ? sanitizeRecord(orderedFallback) : orderedFallback;
+                            await batchWriter.add(item);
+                            if (item) pageSaved++;
+                            return item;
+                        } finally {
+                            completed++;
+                            if (completed % progressStep === 0 || completed === pageJobs.length) {
+                                log.info(`Page ${page + 1} detail progress: ${completed}/${pageJobs.length}`);
+                            }
+                        }
+                    });
+
+                    await batchWriter.flush();
+                    savedCount += pageSaved;
+                    log.info(`Saved ${savedCount}/${resultsWanted} job(s) after page ${page + 1}.`);
+                }
+            }
 
             if (pageListings.length < PAGE_SIZE) break;
         }
 
-        const jobsToProcess = listings.slice(0, resultsWanted);
-
-        if (!jobsToProcess.length) {
+        if (!savedCount) {
             log.warning('No job listings found with the selected filters.');
             return;
         }
 
-        if (!collectDetails) {
-            const output = jobsToProcess
-                .map((item) => {
-                    const ordered = orderOutputRecord(item);
-                    return OMIT_NULL_VALUES ? sanitizeRecord(ordered) : ordered;
-                })
-                .filter(Boolean);
-
-            await pushInBatches(output, PUSH_BATCH_SIZE);
-            log.info(`Finished. Saved ${output.length} listing item(s) without detail expansion.`);
-            return;
-        }
-
-        const progressStep = Math.max(10, DETAIL_CONCURRENCY * 2);
-        let completed = 0;
-
-        const detailedItems = await mapWithConcurrency(jobsToProcess, DETAIL_CONCURRENCY, async (listing) => {
-            const detailUrl = `${BASE_URL}/offres/recherche.rechercheoffre.voletdetail:chargerdetail?${queryString}&idOffre=${listing.offer_id}&indexFin=0&navigation=`;
-
-            try {
-                const response = await request(detailUrl, {
-                    method: 'POST',
-                    isAjax: true,
-                    cookies,
-                });
-
-                let detailHtml = '';
-
-                if (response.statusCode === 200) {
-                    detailHtml = getDetailHtmlFromTapestry(response.body);
-                }
-
-                if (!detailHtml || detailHtml.length < 120) {
-                    const fallback = await request(listing.url, {
-                        method: 'GET',
-                        isAjax: false,
-                        cookies,
-                    });
-                    if (fallback.statusCode === 200) detailHtml = fallback.body;
-                }
-
-                const extracted = extractDetailData(detailHtml, listing);
-                return OMIT_NULL_VALUES ? sanitizeRecord(extracted) : extracted;
-            } catch (error) {
-                log.warning(`Detail fetch failed for ${listing.offer_id}: ${error.message}`);
-                const orderedFallback = orderOutputRecord(listing);
-                return OMIT_NULL_VALUES ? sanitizeRecord(orderedFallback) : orderedFallback;
-            } finally {
-                completed++;
-                if (completed % progressStep === 0 || completed === jobsToProcess.length) {
-                    log.info(`Detail progress: ${completed}/${jobsToProcess.length}`);
-                }
-            }
-        });
-
-        const cleanedItems = detailedItems.filter(Boolean);
-        await pushInBatches(cleanedItems, PUSH_BATCH_SIZE);
-
-        log.info(`Finished. Saved ${cleanedItems.length} job(s) in batches of ${PUSH_BATCH_SIZE}.`);
-    } finally {
-        await Actor.exit();
-    }
+        await batchWriter.flush();
+    log.info(`Finished. Saved ${savedCount} job(s). Dataset writes confirmed: ${batchWriter.total}.`);
+    await Actor.exit();
 }
 
-main().catch((error) => {
-    console.error(error);
-    process.exit(1);
+main().catch(async (error) => {
+    log.error(error instanceof Error ? error.stack || error.message : String(error));
+    await Actor.exit({ exitCode: 1 });
 });

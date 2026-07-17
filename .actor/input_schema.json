@@ -59,7 +59,7 @@
       "description": "Use Apify Proxy for reliable scraping.",
       "editor": "proxy",
       "default": {
-        "useApifyProxy": true
+        "useApifyProxy": false
       }
     }
   },
